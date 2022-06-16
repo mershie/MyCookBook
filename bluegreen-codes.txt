@@ -1,0 +1,343 @@
+############## Main ###################
+provider "aws" {
+  region     = "us-east-1"
+  access_key = "AKIARMS2V5FGGP3OFV4B"
+  secret_key = "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"
+}
+
+############ CodeDeploy ####################################
+#Create CodeDeploy applications and deployment group
+
+resource "aws_iam_role" "Test-CodeDeploy" {
+  name = "TestCodeDeployRole"
+
+  assume_role_policy = <<EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "",
+      "Effect": "Allow",
+      "Principal": {
+        "Service": "codedeploy.amazonaws.com"
+      },
+      "Action": "sts:AssumeRole"
+    }
+  ]
+}
+EOF
+}
+
+resource "aws_iam_role_policy_attachment" "AWSCodeDeployRole" {
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSCodeDeployRole"
+  role       = aws_iam_role.Test-CodeDeploy.name
+}
+
+resource "aws_codedeploy_app" "App-CodeDeploy" {
+  name = "AppCodeDeploy"
+}
+
+resource "aws_sns_topic" "Topic-CodeDeploy" {
+  name = "TopicCodeDeploy"
+}
+
+resource "aws_codedeploy_deployment_group" "DG-CodeDeploy" {
+  app_name              = aws_codedeploy_app.App-CodeDeploy.name
+  deployment_group_name = "codedeploy-group"
+  service_role_arn      = aws_iam_role.Test-CodeDeploy.arn
+
+  ec2_tag_set {
+    ec2_tag_filter {
+      key   = "filterkey1"
+      type  = "KEY_AND_VALUE"
+      value = "filtervalue"
+    }
+
+    ec2_tag_filter {
+      key   = "filterkey2"
+      type  = "KEY_AND_VALUE"
+      value = "filtervalue"
+    }
+  }
+
+  trigger_configuration {
+    trigger_events     = ["DeploymentFailure"]
+    trigger_name       = "codedeploy-trigger"
+    trigger_target_arn = aws_sns_topic.Topic-CodeDeploy.arn
+  }
+
+  auto_rollback_configuration {
+    enabled = true
+    events  = ["DEPLOYMENT_FAILURE"]
+  }
+
+  alarm_configuration {
+    alarms  = ["alarm-codedeploy"]
+    enabled = true
+  }
+}
+
+################### VPC - Subnet - Security groups ###############
+
+#Create a new subnet
+
+resource "aws_subnet" "Test-BlueGreen-1-subnet" {
+  vpc_id                  = "vpc-08612b037d71cbe7e"
+  cidr_block              = "172.31.102.0/24"
+  availability_zone       = "us-east-1a"
+  map_public_ip_on_launch = true
+  tags = {
+    Name = "Test-BlueGreen-1"
+  }
+}
+
+resource "aws_subnet" "Test-BlueGreen-2-subnet" {
+  vpc_id                  = "vpc-08612b037d71cbe7e"
+  cidr_block              = "172.31.103.0/24"
+  availability_zone       = "us-east-1b"
+  map_public_ip_on_launch = true
+  tags = {
+    Name = "Test-BlueGreen-2"
+  }
+}
+#******************************************************************************
+#Create security groups
+
+resource "aws_security_group" "Test-BlueGreen-1-sg" {
+  name        = "Test-BlueGreen-1-sg"
+  description = "Allow HTTP inbound traffic"
+  vpc_id      = "vpc-08612b037d71cbe7e"
+
+  ingress {
+    description = "HTTP from VPC"
+    from_port   = 80
+    to_port     = 80
+    protocol    = "http"
+    #cidr_blocks      = [aws_vpc.main.cidr_block]
+    #ipv6_cidr_blocks = [aws_vpc.main.ipv6_cidr_block]
+  }
+
+  egress {
+    from_port        = 0
+    to_port          = 0
+    protocol         = "-1"
+    cidr_blocks      = ["0.0.0.0/0"]
+    ipv6_cidr_blocks = ["::/0"]
+  }
+
+  tags = {
+    Name = "allow_http"
+  }
+}
+
+resource "aws_security_group" "Test-BlueGreen-2-sg" {
+  name        = "Test-BlueGreen-2-sg"
+  description = "Allow TLS inbound traffic"
+  vpc_id      = "vpc-08612b037d71cbe7e"
+
+  ingress {
+    description = "HTTP from VPC"
+    from_port   = 80
+    to_port     = 80
+    protocol    = "http"
+    #cidr_blocks      = [aws_vpc.main.cidr_block]
+    #ipv6_cidr_blocks = [aws_vpc.main.ipv6_cidr_block]
+  }
+
+  egress {
+    from_port        = 0
+    to_port          = 0
+    protocol         = "-1"
+    cidr_blocks      = ["0.0.0.0/0"]
+    ipv6_cidr_blocks = ["::/0"]
+  }
+
+  tags = {
+    Name = "allow_http"
+  }
+}
+
+############### IAM ########################################
+
+#Create the role for the instance profile
+
+resource "aws_iam_role" "Test_BlueGreenRole" {
+  name = "Test_BlueGreenRole"
+  path = "/"
+
+  assume_role_policy = <<EOF
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Action": "sts:AssumeRole",
+            "Principal": {
+               "Service": "ec2.amazonaws.com"
+            },
+            "Effect": "Allow",
+            "Sid": ""
+        }
+    ]
+}
+EOF
+}
+
+#Create and attache a Policy (AmazonEC2RoleforAWSCodeDeploy)to the role
+
+resource "aws_iam_role_policy" "Test_BlueGreenPolicy" {
+  name = "Test_BlueGreenPolicy"
+  role = aws_iam_role.Test_BlueGreenRole.id
+
+  policy = <<EOF
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Action": [
+                "s3:GetObject",
+                "s3:GetObjectVersion",
+                "s3:ListBucket"
+            ],
+            "Effect": "Allow",
+            "Resource": "*"
+        }
+    ]
+}
+EOF
+}
+
+#Create EC2 instance profile
+
+resource "aws_iam_instance_profile" "Test_BlueGreenProfile" {
+  name = "Dev_BlueGreen"
+  role = aws_iam_role.Test_BlueGreenRole.name
+}
+
+################## EC2 - LoadBalancers LaunchConfigurations AutoScalingGroup ########## 
+
+#create launch configurations
+
+resource "aws_launch_configuration" "Test-BlueGreen" {
+  name_prefix                 = "BlueGreen-instance-"
+  image_id                    = "ami-0262aa28671378260" #data.aws_ami.#webserver-id#.id
+  instance_type               = "t2.micro"
+  user_data                   = file("user-data.sh")
+  security_groups             = [aws_security_group.Test-BlueGreen-1-sg.id, aws_security_group.Test-BlueGreen-2-sg.id]
+  associate_public_ip_address = true
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+#Load balancer
+
+module "alb" {
+  source  = "terraform-aws-modules/alb/aws"
+  version = "~> 6.0"
+
+  name = "Test-BlueGreen-alb"
+
+  load_balancer_type = "application"
+
+  vpc_id          = "vpc-08612b037d71cbe7e"                                                                #main VPC
+  subnets         = [aws_subnet.Test-BlueGreen-1-subnet.id, aws_subnet.Test-BlueGreen-2-subnet.id]         #to follow with the generated ID of Dev-BlueGreen-1-subnet, Dev-BlueGreen-2-subnet
+  security_groups = [aws_security_group.Test-BlueGreen-1-sg.id, aws_security_group.Test-BlueGreen-2-sg.id] #to follow
+
+  #access_logs = {
+  #bucket = "my-alb-logs"
+  #}
+
+  target_groups = [
+    {
+      name_prefix      = "BG-"
+      backend_protocol = "HTTP"
+      backend_port     = 80
+      target_type      = "instance"
+      #targets = {
+      # my_target = {
+      #target_id = "i-0123456789abcdefg"
+      #port = 80
+      #}
+      #my_other_target = {
+      #target_id = "i-a1b2c3d4e5f6g7h8i"
+      #port = 8080
+      #}
+      #}
+    }
+  ]
+}
+/*
+  https_listeners = [
+    {
+      port               = 443
+      protocol           = "HTTPS"
+      #certificate_arn    = "arn:aws:iam::123456789012:server-certificate/test_cert-123456789012"
+      target_group_index = 0
+    }
+  ]
+
+  http_tcp_listeners = [
+    {
+      port               = 80
+      protocol           = "HTTP"
+      target_group_index = 0
+    }
+  ]
+
+  tags = {
+    Environment = "Test"
+  }
+}
+*/
+
+#Auto-scaling-groups
+
+resource "aws_autoscaling_group" "Test-BlueGreen" {
+  name                 = "Test-Bluegreen"
+  min_size             = 2
+  max_size             = 3
+  desired_capacity     = 2
+  launch_configuration = aws_launch_configuration.Test-BlueGreen.name
+  vpc_zone_identifier  = [aws_subnet.Test-BlueGreen-1-subnet.id, aws_subnet.Test-BlueGreen-2-subnet.id]
+
+  tag {
+    key                 = "Name"
+    value               = "Development BlueGreen"
+    propagate_at_launch = true
+  }
+}
+
+################# user_data ####################
+##create user-data.sh files for (user_data       = file("user-data.sh"))
+#!/bin/bash
+yum update -y
+yum -y remove httpd
+yum -y remove httpd-tools
+yum install -y httpd24 php72 mysql57-server php72-mysqlnd
+service httpd start
+chkconfig httpd on
+
+usermod -a -G apache ec2-user
+chown -R ec2-user:apache /var/www
+chmod 2775 /var/www
+find /var/www -type d -exec chmod 2775 {} \;
+find /var/www -type f -exec chmod 0664 {} \;
+cd /var/www/html
+curl http://169.254.169.254/latest/meta-data/instance-id -o index.html
+curl https://raw.githubusercontent.com/hashicorp/learn-terramino/master/index.php -
+
+sudo yum -y update
+sudo yum install -y ruby
+sudo yum install wget
+cd /home/ec2-user
+#curl -O https://aws-codedeploy-us-east-1.s3.amazonaws.com/latest/install
+wget https://aws-codedeploy-us-east-1.s3.us-east-1.amazonaws.com/latest/install
+chmod +x ./install
+sudo ./install auto
+
+#######################################################################
+
+
+
+
